@@ -72,3 +72,28 @@ upset(binary_df,
       order.by = "freq",
       keep.order = TRUE)
 dev.off()
+
+
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(readr)
+
+# Load presence matrix
+df <- read_csv("~/Desktop/timepathway_viz/pathway_presence_matrix.csv")
+
+# Create unique pattern ID for each row (e.g., "11100")
+df <- df %>%
+  mutate(pattern = apply(select(., -Description), 1, paste0, collapse = ""))
+
+# Group by pattern and list pathways
+combo_pathways <- df %>%
+  group_by(pattern) %>%
+  summarise(pathways = paste(Description, collapse = "; "),
+            count = n()) %>%
+  arrange(desc(count))
+
+# Save to file
+write_csv(combo_pathways, "~/Desktop/timepathway_viz/upset_plot/upset_pathway_sets.csv")
