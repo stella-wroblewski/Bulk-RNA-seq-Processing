@@ -1,0 +1,121 @@
+library(tidygraph)
+library(ggraph)
+library(igraph)
+library(readr)
+library(dplyr)
+library(stringr)
+library(ggrepel)
+library(ragg)  # for stable PNG export
+
+input_dir <- "~/Desktop/bulk"
+output_dir <- input_dir
+timepoints <- c("24h", "48h", "72h", "96h", "120h")
+plot_list <- list()
+
+for (tp in timepoints) {
+  cat("\n──────────── Processing", tp, "────────────\n")
+
+  kegg_file <- file.path(input_dir, paste0("KEGG_", tp, ".csv"))
+  kegg <- read_csv(kegg_file, show_col_types = FALSE) %>% filter(p.adjust < 0.05)
+  cat("✔ Loaded", nrow(kegg), "KEGG terms.\n")
+
+  if (nrow(kegg) < 2) {
+    cat("⚠ Skipping", tp, "- not enough significant KEGG terms.\n")
+    next
+  }
+
+  kegg$category <- "KEGG"
+  df <- kegg %>%
+    arrange(p.adjust) %>%
+    slice_head(n = 100)
+  df$timepoint <- tp
+
+  cat("✔ Selected top", nrow(df), "terms by p.adjust\n")
+
+  genesets <- str_split(df$geneID, "/")
+  names(genesets) <- df$Description
+
+  edge_list <- combn(names(genesets), 2, function(x) {
+    g1 <- genesets[[x[1]]]
+    g2 <- genesets[[x[2]]]
+    jac <- length(intersect(g1, g2)) / length(union(g1, g2))
+    if (jac > 0.1) {
+      return(tibble(from = x[1], to = x[2], weight = jac))
+    } else {
+      return(NULL)
+    }
+  }, simplify = FALSE) %>% bind_rows()
+
+  cat("✔ Built", nrow(edge_list), "edges (Jaccard > 0.1)\n")
+
+  nodes <- df %>% select(name = Description, p.adjust, Count, category)
+  connected_nodes <- unique(c(edge_list$from, edge_list$to))
+  nodes <- nodes %>% filter(name %in% connected_nodes)
+
+  graph <- tbl_graph(nodes = nodes, edges = edge_list, directed = FALSE) %>%
+    activate(nodes) %>%
+    filter(centrality_degree() > 0)
+
+  cat("✔ Graph has", gorder(graph), "nodes and", gsize(graph), "edges after filtering\n")
+
+  graphml_path <- file.path(output_dir, paste0("Pathway_Network_", tp, "_KEGG.graphml"))
+  igraph::write_graph(as.igraph(graph), graphml_path, format = "graphml")
+  cat("✔ Exported to", graphml_path, "\n")
+
+  top_nodes <- graph %>%
+    activate(nodes) %>%
+    arrange(p.adjust) %>%
+    slice_head(n = 30) %>%
+    pull(name)
+
+  label_nodes <- if (gorder(graph) > 100) character(0) else top_nodes
+  layout_choice <- if (gorder(graph) > 150) "circle" else "kk"
+
+  layout_data <- create_layout(graph, layout = layout_choice) %>%
+    left_join(
+      as_tibble(graph, active = "nodes") %>% distinct(name, .keep_all = TRUE),
+      by = "name"
+    ) %>%
+    rename(
+      p.adjust = p.adjust.x,
+      Count = Count.x,
+      category = category.x
+    )
+
+  cat("✔ Created layout using", layout_choice, "layout\n")
+  cat("🧪 Columns in layout_data:", paste(colnames(layout_data), collapse = ", "), "\n")
+  cat("🧪 Sample layout:\n")
+  print(head(layout_data, 3))
+
+  # ── 1. Labeled Plot ─────────────────────────────────────
+  p <- ggraph(layout_data) +
+    geom_edge_link(aes(width = weight), alpha = 0.3) +
+    geom_node_point(aes(size = -log10(p.adjust), color = category)) +
+    geom_node_text(aes(label = ifelse(name %in% label_nodes, name, "")),
+                   repel = TRUE, size = 2.5) +
+    scale_edge_width(range = c(0.5, 2)) +
+    theme_void() +
+    ggtitle(paste("KEGG Pathway Overlap Network –", tp)) +
+    theme(legend.position = "right")
+
+  p_path <- file.path(output_dir, paste0("Pathway_Network_", tp, "_KEGG_labeled.png"))
+  ragg::agg_png(filename = p_path, width = 10, height = 8, units = "in", res = 300)
+  print(p)
+  dev.off()
+  cat("✔ Saved labeled PNG to:", p_path, "\n")
+
+  # ── 2. Simple Plot ─────────────────────────────────────
+  p_simple <- ggraph(layout_data) +
+    geom_edge_link(aes(width = weight), alpha = 0.2) +
+    geom_node_point(aes(size = -log10(p.adjust), color = category)) +
+    scale_edge_width(range = c(0.5, 2)) +
+    theme_void() +
+    ggtitle(paste("KEGG Pathway Overlap Network –", tp, "(Simple)")) +
+    theme(legend.position = "right")
+
+  simple_path <- file.path(output_dir, paste0("Pathway_Network_", tp, "_KEGG_simple.png"))
+  ragg::agg_png(filename = simple_path, width = 10, height = 8, units = "in", res = 300)
+  print(p_simple)
+  dev.off()
+  cat("✔ Saved simple PNG to:", simple_path, "\n")
+}
