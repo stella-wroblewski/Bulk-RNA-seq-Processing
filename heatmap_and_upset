@@ -1,0 +1,74 @@
+# ── Load Libraries ────────────────────────────────────────
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ComplexHeatmap)
+library(UpSetR)
+
+# ── Setup ─────────────────────────────────────────────────
+timepoints <- c("24h", "48h", "72h", "96h", "120h")
+input_dir <- "~/Desktop/bulk"
+output_dir <- "~/Desktop/timepathway_viz"
+heatmap_dir <- file.path(output_dir, "jaccard_heatmap")
+upset_dir <- file.path(output_dir, "upset_plot")
+
+# Create directories if missing
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(heatmap_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(upset_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ── 1. Load KEGG CSVs ─────────────────────────────────────
+kegg_list <- list()
+
+for (tp in timepoints) {
+  file_path <- file.path(input_dir, paste0("KEGG_", tp, ".csv"))
+  if (file.exists(file_path)) {
+    df <- read_csv(file_path, show_col_types = FALSE) %>%
+      filter(p.adjust < 0.05) %>%
+      mutate(timepoint = tp)
+    kegg_list[[tp]] <- df
+  }
+}
+
+# ── 2. Build Pathway Presence Matrix ─────────────────────
+combined <- bind_rows(kegg_list)
+
+pathway_matrix <- combined %>%
+  distinct(timepoint, Description) %>%
+  mutate(present = 1) %>%
+  pivot_wider(names_from = timepoint, values_from = present, values_fill = 0)
+
+write.csv(pathway_matrix,
+          file.path(output_dir, "pathway_presence_matrix.csv"),
+          row.names = FALSE)
+
+# ── 3. Jaccard Overlap Matrix ────────────────────────────
+presence_mat <- pathway_matrix %>% select(-Description) %>% as.matrix()
+n <- ncol(presence_mat)
+jaccard_mat <- matrix(0, nrow = n, ncol = n)
+colnames(jaccard_mat) <- rownames(jaccard_mat) <- colnames(presence_mat)
+
+for (i in 1:n) {
+  for (j in 1:n) {
+    inter <- sum(presence_mat[, i] & presence_mat[, j])
+    union <- sum(presence_mat[, i] | presence_mat[, j])
+    jaccard_mat[i, j] <- ifelse(union > 0, inter / union, 0)
+  }
+}
+
+# ── 4. Save Jaccard Heatmap ──────────────────────────────
+png(file.path(heatmap_dir, "jaccard_overlap_heatmap.png"), width = 800, height = 700)
+Heatmap(jaccard_mat, name = "Jaccard", cluster_rows = FALSE, cluster_columns = FALSE)
+dev.off()
+
+# ── 5. Save UpSet Plot ───────────────────────────────────
+binary_df <- as.data.frame(presence_mat)
+binary_df$Description <- pathway_matrix$Description
+
+png(file.path(upset_dir, "upset_pathway_presence.png"), width = 1000, height = 600)
+upset(binary_df,
+      sets = colnames(presence_mat),
+      order.by = "freq",
+      keep.order = TRUE)
+dev.off()
